@@ -3,6 +3,8 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from tortoise.expressions import F
+from pydantic import BaseModel, ConfigDict
+from typing import Literal
 
 from apps.admin.dependencies import get_admin_session
 from apps.base.dependencies import get_client_ip
@@ -121,3 +123,34 @@ def upgrade_notice():
         "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     })
+
+
+class NotificationTestRequest(BaseModel):
+    """测试按钮只接受已保存渠道，不允许携带任意外发地址或消息正文。"""
+
+    model_config = ConfigDict(extra="forbid")
+    channel: Literal["email", "webhook"]
+
+
+@admin_api.get("/notifications/config")
+async def notification_config():
+    from apps.delivery.notification_settings import read_notification_config, public_notification_config
+    return APIResponse(detail=public_notification_config(await read_notification_config()))
+
+
+@admin_api.put("/notifications/config")
+async def update_notification_config(data: dict):
+    from apps.delivery.notification_settings import save_notification_config
+    return APIResponse(detail=await save_notification_config(data))
+
+
+@admin_api.post("/notifications/test")
+async def test_notification(data: NotificationTestRequest):
+    from apps.delivery.notifications import enqueue_test
+    return APIResponse(detail=await enqueue_test(data.channel))
+
+
+@admin_api.get("/notifications/events")
+async def notification_events():
+    from apps.delivery.notifications import list_notification_events
+    return APIResponse(detail=await list_notification_events())

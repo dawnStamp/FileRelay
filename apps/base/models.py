@@ -134,3 +134,25 @@ key_value_pydantic = pydantic_model_creator(KeyValue, name="KeyValue")
 presign_upload_session_pydantic = pydantic_model_creator(
     PresignUploadSession, name="PresignUploadSession"
 )
+
+
+class DeliveryNotification(models.Model):
+    """成功收件的通知发件箱；与文件同事务入队，发送失败不会回滚已成功的寄件。"""
+
+    id = fields.IntField(primary_key=True)
+    event_id = fields.CharField(max_length=36)
+    channel = fields.CharField(max_length=16)
+    revision = fields.CharField(max_length=36)
+    # 只保留通知白名单元数据，不存文件内容、口令、URL 或渠道密钥。
+    payload = fields.JSONField()
+    status = fields.CharField(max_length=16, default="pending")
+    attempts = fields.IntField(default=0)
+    next_attempt_at = fields.DatetimeField()
+    last_error = fields.CharField(max_length=100, default="")
+    is_test = fields.BooleanField(default=False)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    sent_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        unique_together = (("event_id", "channel"),)
+        indexes = (("status", "next_attempt_at"),)

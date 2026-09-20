@@ -15,6 +15,7 @@ from core.logger import logger
 from core.settings import settings
 from core.storage import StoredFile, storages
 from core.utils import get_now
+from apps.delivery.notifications import enqueue_received
 
 STALE_SECONDS = 7200
 
@@ -108,6 +109,8 @@ async def commit_delivery(record, fields):
             fields["prefix"], fields["suffix"] = os.path.splitext(record.filename)
             fields.update(file_path=record.file_path, uuid_file_name=record.stored_name)
         share = await FileCodes.create(using_db=conn, **fields)
+        # 通知与成功收件同事务入队；网络发送由独立后台任务完成，重试完成接口不会重复入队。
+        await enqueue_received(share, conn)
         # 耗尽后保留授权历史和文件关联；管理员增加次数后可显式重新启用。
         await DeliveryCode.filter(id=record.delivery_id, reserved_count=0, used_count__gte=F("max_uploads")).using_db(conn).update(enabled=False)
         return share

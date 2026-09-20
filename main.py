@@ -30,6 +30,7 @@ from apps.base.tasks import (
 from apps.base.views import share_api, chunk_api, presign_api
 from apps.base.upload_sessions import cleanup_loop as delivery_cleanup_loop
 from apps.delivery.views import admin_api as delivery_admin_api, public_api as delivery_api, pages as delivery_pages
+from apps.delivery.notifications import notification_loop
 from core.database import db_startup_lock, get_db_config, init_db
 from core.errors import StorageError
 from core.logger import get_log_level_name, is_access_log_enabled, logger
@@ -52,6 +53,8 @@ async def lifespan(app: FastAPI):
     presign_cleanup_task = asyncio.create_task(clean_expired_presign_sessions())
     # 独立回收崩溃遗留的寄件次数与文件，不改变普通分享的过期清理规则。
     delivery_cleanup_task = asyncio.create_task(delivery_cleanup_loop())
+    # 收件通知不占用上传响应，独立循环负责限次重试与过期状态清理。
+    notification_task = asyncio.create_task(notification_loop())
     logger.info("应用初始化完成")
 
     try:
@@ -61,11 +64,13 @@ async def lifespan(app: FastAPI):
         chunk_cleanup_task.cancel()
         presign_cleanup_task.cancel()
         delivery_cleanup_task.cancel()
+        notification_task.cancel()
         await asyncio.gather(
             task,
             chunk_cleanup_task,
             presign_cleanup_task,
             delivery_cleanup_task,
+            notification_task,
             return_exceptions=True,
         )
         await Tortoise.close_connections()

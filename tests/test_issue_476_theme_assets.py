@@ -32,8 +32,9 @@ class ThemeAssetTests(SettingsOverrideMixin, unittest.TestCase):
             "assets", self.get_theme_index_asset("themes/2024")
         )
 
-        self.assertIn("themes/2023/assets", str(theme_2023_asset))
-        self.assertIn("themes/2024/assets", str(theme_2024_asset))
+        # 按实际目录比较，避免 Windows 的反斜杠导致主题正确时仍被误报。
+        self.assertEqual(theme_2023_asset.parent, BASE_DIR / "themes" / "2023" / "assets")
+        self.assertEqual(theme_2024_asset.parent, BASE_DIR / "themes" / "2024" / "assets")
 
     def test_rejects_theme_asset_path_traversal(self):
         settings.themes_select = "themes/2024"

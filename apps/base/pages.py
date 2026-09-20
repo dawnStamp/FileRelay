@@ -91,8 +91,16 @@ async def theme_asset(asset_path: str):
 @router.get("/")
 async def index(request=None, exc=None):
     # 新增寄件接口的 404 保持 JSON 状态码，不能被主题 SPA 回退改成 HTML 200。
-    if request is not None and request.url.path.startswith(("/api/delivery", "/admin/delivery", "/delivery-assets/")):
-        return JSONResponse(status_code=404, content={"detail": getattr(exc, "detail", "资源不存在")})
+    if request is not None:
+        path = request.url.path
+        # 寄件复用的上传接口也会因会话归属不符抛出 404；必须保留错误语义，
+        # 否则前端收到 HTML 200 会误判成功。仅识别已匹配路由的寄件会话，保留普通页面回退。
+        delivery_upload = (
+            str(request.path_params.get("upload_id", "")).startswith("d_")
+            and path.startswith(("/chunk/upload/", "/presign/upload/", "/api/presign/upload/"))
+        )
+        if delivery_upload or path.startswith(("/api/delivery", "/admin/delivery", "/delivery-assets/")):
+            return JSONResponse(status_code=404, content={"detail": getattr(exc, "detail", "资源不存在")})
     # Site config is admin input (and during the setup window anyone can claim it);
     # always escape before injecting into the theme template to prevent stored XSS
     # (mirrors the setup page).
