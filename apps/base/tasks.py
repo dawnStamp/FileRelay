@@ -20,7 +20,8 @@ from core.logger import logger
 from core.settings import settings, data_root
 from core.storage import FileStorageInterface, StoredFile, storages
 from apps.base.services import stored_file_of
-from apps.base.local_share import is_local_ref
+from apps.base.share_storage import storage_for_share
+from apps.base.local_share import is_local_ref, should_skip_storage_delete
 from core.utils import get_now
 
 async def delete_expire_files():
@@ -36,16 +37,23 @@ async def delete_expire_files():
             await ip_limit["error"].remove_expired_ip()
             await ip_limit["metadata"].remove_expired_ip()
             await ip_limit["upload"].remove_expired_ip()
-            await StorageReservation.filter(expires_at__lte=await get_now()).delete()
+            await StorageReservation.filter(expires_at__lte=await get_now(), delivery_id__isnull=True).delete()
             expire_data = await FileCodes.filter(
                 Q(expired_at__lt=await get_now()) | Q(expired_count=0)
             ).all()
             for exp in expire_data:
                 try:
-                    if not is_local_ref(exp):
+                    if exp.delivery_id is not None:
+                        # 寄件沿用统一过期任务，仅覆盖授权后端与文本无需删文件的情形。
+                        if not should_skip_storage_delete(exp):
+                            await (await storage_for_share(exp)).delete_file(stored_file_of(exp))
+                    elif not is_local_ref(exp):
                         await file_storage.delete_file(stored_file_of(exp))
                 except Exception as e:
                     logger.error(f"删除过期文件失败 code={exp.code}: {e}")
+                    # 寄件保留失败记录供重试；普通文件清理不改变上游语义。
+                    if exp.delivery_id is not None:
+                        continue
                 try:
                     await exp.delete()
                 except Exception as e:
@@ -66,7 +74,7 @@ async def clean_incomplete_uploads():
             expire_time = now - datetime.timedelta(hours=expire_hours)
             expired_sessions = await UploadChunk.filter(
                 chunk_index=-1, created_at__lt=expire_time
-            ).all()
+            ).exclude(upload_id__startswith="d_").all()
 
             for session in expired_sessions:
                 try:
@@ -106,7 +114,7 @@ async def clean_expired_presign_sessions():
             now = await get_now()
             expired_sessions = await PresignUploadSession.filter(
                 expires_at__lt=now
-            ).all()
+            ).exclude(upload_id__startswith="d_").all()
             for session in expired_sessions:
                 if session.mode == "direct":
                     try:

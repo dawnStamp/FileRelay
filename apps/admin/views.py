@@ -386,6 +386,7 @@ async def file_list(
     health: str = "",
     sort_by: str = "created_at",
     sort_order: str = "desc",
+    delivery_id: Optional[int] = None,
     file_service: FileService = Depends(get_file_service),
 ):
     page = max(page, 1)
@@ -399,6 +400,7 @@ async def file_list(
         health=health,
         sort_by=sort_by,
         sort_order=sort_order,
+        delivery_id=delivery_id,
     )
     return APIResponse(
         detail={

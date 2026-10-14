@@ -14,7 +14,7 @@ from core.settings import (
 from apps.base.config import refresh_settings
 from apps.base.services import get_stored_download, response_from_download, stored_file_of
 from core.security import INTERNAL_CONFIG_KEYS, generate_jwt_secret
-from apps.base.models import FileCodes, KeyValue
+from apps.base.models import DeliveryCode, FileCodes, KeyValue
 from apps.base.utils import get_expire_info
 from apps.base.local_share import (
     LOCAL_REF_MARKER,
@@ -26,6 +26,8 @@ from apps.base.local_share import (
     resolve_under_local,
     should_skip_storage_delete,
 )
+from apps.base.metadata import normalize_metadata_note, normalize_metadata_tags
+from apps.base.share_storage import storage_for_share, storage_type_for_share
 from fastapi import HTTPException
 from core.utils import get_now, hash_password, is_password_hashed, validate_background_url
 
@@ -102,8 +104,11 @@ class FileService:
         return f"{self.FILE_METADATA_KEY_PREFIX}{file_id}"
 
     async def _delete_file_code(self, file_code: FileCodes):
+        # 寄件文件与普通文件共用删除流程，失败时保留记录供重试。
+        # NAS 引用只删除分享记录，不能删除原始文件。
         if not should_skip_storage_delete(file_code):
-            await self.file_storage.delete_file(stored_file_of(file_code))
+            storage = await storage_for_share(file_code, self._file_storage)
+            await storage.delete_file(stored_file_of(file_code))
         await KeyValue.filter(key=self._file_metadata_key(file_code.id)).delete()
         await file_code.delete()
 
@@ -220,7 +225,8 @@ class FileService:
             raise HTTPException(status_code=404, detail="文件不存在")
 
         update_data: dict[str, Any] = {}
-        if code is not None and code != file_code.code:
+        # 历史私有文件没有公开口令，普通编辑不能改变其内部标识或公开权限。
+        if code is not None and not file_code.is_private and code != file_code.code:
             if await FileCodes.filter(code=code).first():
                 raise HTTPException(status_code=400, detail="code已存在")
             update_data["code"] = code
@@ -481,6 +487,7 @@ class FileService:
         health: str = "",
         sort_by: str = "created_at",
         sort_order: str = "desc",
+        delivery_id: int | None = None,
     ):
         page = max(page, 1)
         size = min(max(size, 1), 100)
@@ -491,7 +498,13 @@ class FileService:
         sort_by = self._normalize_sort_by(sort_by)
         reverse = sort_order.strip().lower() != "asc"
 
-        all_files = await FileCodes.all()
+        query = FileCodes.all()
+        if delivery_id is not None:
+            # 收件列表复用文件管理的数据与操作，只限定当前管理员选中的寄件码。
+            if not await DeliveryCode.filter(id=delivery_id).exists():
+                raise HTTPException(404, "寄件码不存在")
+            query = query.filter(delivery_id=delivery_id)
+        all_files = await query
         now = await get_now()
         enriched_files = []
         summary = {
@@ -582,6 +595,8 @@ class FileService:
     ) -> dict[str, Any]:
         if now is None:
             now = await get_now()
+        # 兼容未携带寄件字段的原文件列表对象，普通文件仍按原规则展示。
+        is_private = getattr(file_code, "is_private", False)
         is_text = file_code.text is not None
         is_expired = await file_code.is_expired()
         name = f"{file_code.prefix}{file_code.suffix}"
@@ -593,7 +608,8 @@ class FileService:
         )
         data = {
             "id": file_code.id,
-            "code": file_code.code,
+            "code": "" if is_private else file_code.code,
+            "is_private": is_private,
             "prefix": file_code.prefix,
             "suffix": file_code.suffix,
             "uuid_file_name": file_code.uuid_file_name,
@@ -668,6 +684,8 @@ class FileService:
             is_text=is_text,
         )
 
+        # 只有寄件文件展示授权后端，普通文件仍显示站点当前设置。
+        display_storage_type = await storage_type_for_share(file_code)
         detail.update(
             {
                 "filename": detail["name"],
@@ -678,7 +696,7 @@ class FileService:
                 "text_length": text_length,
                 "can_preview_text": is_text,
                 "can_download": can_download,
-                "storage_backend": settings.file_storage,
+                "storage_backend": display_storage_type,
                 "file_path": file_code.file_path,
                 "uuid_file_name": file_code.uuid_file_name,
                 "upload_id": file_code.upload_id,
@@ -690,7 +708,7 @@ class FileService:
                     "is_permanent": is_permanent,
                 },
                 "storage": {
-                    "backend": settings.file_storage,
+                    "backend": display_storage_type,
                     "file_path": file_code.file_path,
                     "uuid_file_name": file_code.uuid_file_name,
                     "file_hash": file_code.file_hash,
@@ -713,33 +731,12 @@ class FileService:
         return detail
 
     def _normalize_metadata_note(self, note: Optional[str]) -> str:
-        if note is None:
-            return ""
-        return str(note).strip()[: self.MAX_METADATA_NOTE_LENGTH]
+        # 与寄件管理共用规则，避免两个后台的备注长度和裁剪行为不一致。
+        return normalize_metadata_note(note)
 
     def _normalize_metadata_tags(self, tags: Any) -> list[str]:
-        if not tags:
-            return []
-        if isinstance(tags, str):
-            tags = [tags]
-        elif not isinstance(tags, list):
-            return []
-
-        normalized_tags = []
-        seen_tags = set()
-        for raw_tag in tags:
-            tag = str(raw_tag).strip()
-            if not tag:
-                continue
-            tag = tag[: self.MAX_METADATA_TAG_LENGTH]
-            dedupe_key = tag.lower()
-            if dedupe_key in seen_tags:
-                continue
-            seen_tags.add(dedupe_key)
-            normalized_tags.append(tag)
-            if len(normalized_tags) >= self.MAX_METADATA_TAGS:
-                break
-        return normalized_tags
+        # 标签数量、长度和忽略大小写去重统一由公共模块维护。
+        return normalize_metadata_tags(tags)
 
     def _normalize_file_metadata(self, metadata: Any) -> dict[str, Any]:
         if not isinstance(metadata, dict):
@@ -1417,7 +1414,8 @@ class FileService:
         if file_code.text:
             return APIResponse(detail=file_code.text)
         else:
-            return response_from_download(await get_stored_download(file_code, self.file_storage))
+            # NAS 和普通下载沿用上游路径，寄件文件使用其授权后端。
+            return response_from_download(await get_stored_download(file_code, self._file_storage))
 
     async def preview_file(self, file_id: int, max_chars: int = 4000):
         max_chars = min(max(max_chars, 1), 20000)
@@ -1431,7 +1429,8 @@ class FileService:
         preview = content[:max_chars]
         return {
             "id": file_code.id,
-            "code": file_code.code,
+            "code": "" if file_code.is_private else file_code.code,
+            "is_private": file_code.is_private,
             "name": f"{file_code.prefix}{file_code.suffix}",
             "type": "text",
             "content": preview,
@@ -1448,6 +1447,7 @@ class FileService:
         if not await local_file.exists():
             raise HTTPException(status_code=404, detail="文件不存在")
 
+        # NAS 分享引用已有文件，不复制到上传目录，也不消耗上传配额。
         expired_at, expired_count, used_count, code = await get_expire_info(
             item.expire_value, item.expire_style
         )

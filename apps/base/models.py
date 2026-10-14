@@ -30,6 +30,11 @@ class FileCodes(models.Model):
     file_hash = fields.CharField(max_length=64, null=True)
     is_chunked = fields.BooleanField(default=False)
     upload_id = fields.CharField(max_length=36, null=True)
+    # 寄件文件直接关联授权；历史私有收件仅供后台读取，不自动公开。
+    delivery_id = fields.IntField(null=True, index=True)
+    is_private = fields.BooleanField(default=False)
+    # 仅寄件文件记录授权指定的真实后端；普通文件不写入也不读取该字段。
+    storage_type = fields.CharField(max_length=20, null=True)
 
     async def is_expired(self):
         if self.expired_at is None:
@@ -93,6 +98,35 @@ class StorageReservation(models.Model):
     token = fields.CharField(max_length=64, unique=True, index=True)
     size = fields.BigIntField()
     expires_at = fields.DatetimeField(index=True)
+    # 寄件预占复用容量预留；成功后整行删除，持久文件只保存到 FileCodes。
+    delivery_id = fields.IntField(null=True, index=True)
+    auth_version = fields.IntField(default=1)
+    status = fields.CharField(max_length=20, default="pending")
+    filename = fields.CharField(max_length=255, default="")
+    stored_name = fields.CharField(max_length=255, default="")
+    file_path = fields.CharField(max_length=255, default="")
+    storage_type = fields.CharField(max_length=20, null=True)
+
+
+class DeliveryCode(models.Model):
+    """只授予投递权限的口令；不进入公开取件码表，避免形成下载授权。"""
+
+    id = fields.IntField(pk=True)
+    # 原文作为唯一上传口令；NULL 只用于已停用、等待管理员重新设码的历史记录。
+    code_value = fields.CharField(max_length=64, null=True, unique=True)
+    # 改码时递增，令牌携带该版本后可立即撤销旧寄件授权。
+    auth_version = fields.IntField(default=1)
+    name = fields.CharField(max_length=100)
+    note = fields.CharField(max_length=2000, default="")
+    tags = fields.JSONField(default=list)
+    # 两项同时为 NULL 表示永久且不限次数；仍保留使用统计和管理员启停。
+    expires_at = fields.DatetimeField(null=True)
+    max_uploads = fields.IntField(null=True)
+    used_count = fields.IntField(default=0)
+    reserved_count = fields.IntField(default=0)
+    enabled = fields.BooleanField(default=True)
+    deleted = fields.BooleanField(default=False)
+    created_at = fields.DatetimeField(auto_now_add=True)
 
 
 file_codes_pydantic = pydantic_model_creator(FileCodes, name="FileCodes")
