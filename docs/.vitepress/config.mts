@@ -33,6 +33,7 @@ export default defineConfig({
               // 寄件码的上传授权与普通取件码用途不同，单独说明。
               { text: '寄件码', link: '/guide/delivery' },
               { text: '存储配置', link: '/guide/storage' },
+              { text: 'MCP 接入', link: '/guide/mcp' },
             ],
           },
           { text: 'API', link: '/api/' },
@@ -68,6 +69,7 @@ export default defineConfig({
                 { text: '文件管理', link: '/guide/management' },
                 // 新增寄件功能入口，文档随本仓库维护。
                 { text: '寄件码', link: '/guide/delivery' },
+                { text: 'MCP 接入', link: '/guide/mcp' },
               ],
             },
             {
@@ -152,6 +154,7 @@ export default defineConfig({
               { text: 'Getting Started', link: '/en/guide/getting-started' },
               { text: 'Upload & Share', link: '/en/guide/upload' },
               { text: 'Admin Panel', link: '/en/guide/management' },
+              { text: 'MCP Integration', link: '/en/guide/mcp' },
               { text: 'Storage', link: '/en/guide/storage' },
             ],
           },
@@ -189,6 +192,7 @@ export default defineConfig({
                 { text: 'File Upload', link: '/en/guide/upload' },
                 { text: 'File Sharing', link: '/en/guide/share' },
                 { text: 'File Management', link: '/en/guide/management' },
+                { text: 'MCP Integration', link: '/en/guide/mcp' },
               ],
             },
             {

@@ -20,7 +20,7 @@ from apps.base.config import (
     refresh_settings,
 )
 from apps.base.models import KeyValue
-from apps.base.pages import index, router as pages_router
+from apps.base.pages import not_found_handler, router as pages_router
 from apps.base.setup_wizard import build_setup_page, is_setup_path, setup_response, wants_html_response
 from apps.base.tasks import (
     clean_expired_presign_sessions,
@@ -28,8 +28,10 @@ from apps.base.tasks import (
     delete_expire_files,
 )
 from apps.base.views import share_api, chunk_api, presign_api
+# 同时注册寄件授权与上游 MCP 接口，二者共享普通上传服务。
 from apps.base.upload_sessions import cleanup_loop as delivery_cleanup_loop
 from apps.delivery.views import admin_api as delivery_admin_api, public_api as delivery_api, pages as delivery_pages
+from apps.base.mcp import router as mcp_router
 from core.database import db_startup_lock, get_db_config, init_db
 from core.errors import StorageError
 from core.logger import get_log_level_name, is_access_log_enabled, logger
@@ -148,9 +150,10 @@ app.include_router(delivery_admin_api)
 app.include_router(delivery_api)
 app.include_router(delivery_pages)
 app.include_router(pages_router)
+app.include_router(mcp_router)
 
 # 404 时返回主题首页（index 兼任 exception handler 与 GET / 路由）
-app.add_exception_handler(404, index)
+app.add_exception_handler(404, not_found_handler)
 
 
 if __name__ == "__main__":

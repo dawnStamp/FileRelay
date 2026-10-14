@@ -6,7 +6,8 @@ from datetime import timedelta
 
 from fastapi import Header, HTTPException, Request
 
-from apps.admin.dependencies import share_required_login, verify_token
+# 认证使用上游公共模块，避免通过管理员服务引入循环依赖。
+from apps.base.auth import share_required_login, verify_token
 from apps.base.models import FileCodes, StorageReservation
 from apps.base.upload_sessions import reserve_slot, heartbeat, abort_upload, commit_delivery, STALE_SECONDS
 from apps.delivery.services import upload_identity, active_code

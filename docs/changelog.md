@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.8.3](https://github.com/vastsa/FileCodeBox/compare/v2.8.2...v2.8.3) (2026-10-10)
+
+
+### Bug Fixes
+
+* remove HTML preview endpoint ([65f4929](https://github.com/vastsa/FileCodeBox/commit/65f4929d405408e1c9e58127e0097f8b78b1819f))
+
+## [2.8.2](https://github.com/vastsa/FileCodeBox/compare/v2.8.1...v2.8.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* type MCP protocol results ([da374b4](https://github.com/vastsa/FileCodeBox/commit/da374b459537ee079e1d03da121a935c8fb18f0e))
+
+## [2.8.1](https://github.com/vastsa/FileCodeBox/compare/v2.8.0...v2.8.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* restore lint and Docker theme build ([2f5eab1](https://github.com/vastsa/FileCodeBox/commit/2f5eab18b1ab28fcb4f416248076ce574998d718))
+
+## [2.8.0](https://github.com/vastsa/FileCodeBox/compare/v2.7.1...v2.8.0) (2026-10-10)
+
+
+### Features
+
+* add MCP quick share and safe HTML preview ([63e72c1](https://github.com/vastsa/FileCodeBox/commit/63e72c145576d169265e4fa8cf373e33531a06a0))
+
+## [2.7.1](https://github.com/vastsa/FileCodeBox/compare/v2.7.0...v2.7.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* keep Docker as root, close s3_hostname SSRF, unbreak 404 tests ([031d300](https://github.com/vastsa/FileCodeBox/commit/031d300caea99117e82b3bddc3e5d0532cf3efa6))
+
 ## [2.7.0](https://github.com/vastsa/FileCodeBox/compare/v2.6.1...v2.7.0) (2026-09-16)
 
 

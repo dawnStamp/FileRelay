@@ -8,7 +8,8 @@ from tortoise.exceptions import IntegrityError
 from tortoise.expressions import F, Q
 from tortoise.transactions import in_transaction
 
-from apps.admin.dependencies import create_token, verify_token
+# 认证使用上游公共模块，避免通过管理员服务引入循环依赖。
+from apps.base.auth import create_token, verify_token
 from apps.base.models import DeliveryCode, StorageReservation
 from apps.base.quota import _sql_placeholders
 from apps.base.setup_wizard import build_public_config
