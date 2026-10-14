@@ -38,7 +38,7 @@ async def upload_identity(authorization: str | None) -> int:
 
 async def active_code(code_id: int) -> DeliveryCode:
     record = await DeliveryCode.filter(id=code_id, enabled=True, deleted=False).first()
-    if not record or record.expires_at <= await get_now():
+    if not record or (record.expires_at is not None and record.expires_at <= await get_now()):
         raise HTTPException(403, "寄件码无效、已过期或已停用")
     return record
 
@@ -49,7 +49,8 @@ async def create_code(data):
     try:
         record = await DeliveryCode.create(
             code_value=code, name=data.name,
-            expires_at=data.expires_at, max_uploads=data.max_uploads,
+            expires_at=None if data.is_permanent else data.expires_at,
+            max_uploads=None if data.is_permanent else data.max_uploads,
             note=data.note, tags=data.tags,
         )
     except IntegrityError:
@@ -63,21 +64,21 @@ async def code_summary(record, *, include_code=False):
     state = "active"
     if record.deleted:
         state = "deleted"
-    elif record.used_count >= record.max_uploads:
+    elif record.max_uploads is not None and record.used_count >= record.max_uploads:
         state = "exhausted"
     elif not record.enabled:
         state = "disabled"
-    elif record.expires_at <= now:
+    elif record.expires_at is not None and record.expires_at <= now:
         state = "expired"
     return {
         "id": record.id, "name": record.name,
         **({"code": record.code_value} if include_code else {}),
         "note": record.note, "tags": record.tags if isinstance(record.tags, list) else [],
-        "expires_at": record.expires_at,
+        "expires_at": record.expires_at, "is_permanent": record.expires_at is None,
         "max_uploads": record.max_uploads, "used_count": record.used_count,
         "reserved_count": record.reserved_count, "enabled": record.enabled,
         "deleted": record.deleted, "status": state, "created_at": record.created_at,
-        "remaining": max(0, record.max_uploads - record.used_count - record.reserved_count),
+        "remaining": None if record.max_uploads is None else max(0, record.max_uploads - record.used_count - record.reserved_count),
     }
 
 
@@ -86,9 +87,9 @@ async def verify_code(code: str):
     if not record:
         raise HTTPException(403, "寄件码无效、已过期或已停用")
     record = await active_code(record.id)
-    remaining = record.max_uploads - record.used_count - record.reserved_count
+    remaining = None if record.max_uploads is None else record.max_uploads - record.used_count - record.reserved_count
     # 已预占的分片会话允许重新验证后续传，新文件仍由 reserve_slot 拒绝超额。
-    if remaining <= 0 and not await StorageReservation.filter(delivery_id=record.id, status__in=["pending", "finalizing"]).exists():
+    if remaining is not None and remaining <= 0 and not await StorageReservation.filter(delivery_id=record.id, status__in=["pending", "finalizing"]).exists():
         raise HTTPException(409, "可上传次数已耗尽或正在使用，请联系管理员")
     return await session_summary(record)
 
@@ -102,8 +103,8 @@ async def session_summary(record):
         "token": create_token({"purpose": "delivery", "delivery_id": record.id,
                                "delivery_version": record.auth_version}, expires_in=TOKEN_TTL),
         "expires_in": TOKEN_TTL, "name": record.name,
-        "remaining": max(0, record.max_uploads - record.used_count - record.reserved_count),
-        "expires_at": record.expires_at,
+        "remaining": None if record.max_uploads is None else max(0, record.max_uploads - record.used_count - record.reserved_count),
+        "expires_at": record.expires_at, "is_permanent": record.expires_at is None,
         **{key: config[key] for key in upload_keys},
     }
 
@@ -113,7 +114,9 @@ async def refresh_session(authorization):
     code_id = await upload_identity(authorization)
     record = await DeliveryCode.get(id=code_id)
     # 耗尽自动停用仅允许获取既有完成结果，创建上传仍由原子预占拒绝。
-    if record.expires_at <= await get_now() or (not record.enabled and record.used_count < record.max_uploads):
+    if (record.expires_at is not None and record.expires_at <= await get_now()) or (
+        not record.enabled and (record.max_uploads is None or record.used_count < record.max_uploads)
+    ):
         raise HTTPException(403, "寄件码已过期或停用")
     return await session_summary(record)
 
@@ -126,13 +129,14 @@ async def update_code(code_id, data):
             raise HTTPException(404, "寄件码不存在或已删除")
         changes = data.model_dump(exclude_unset=True)
         new_code = changes.pop("code", "")
-        # 空值和省略均保持历史口令，因此此前 32 位以上的旧码仍可继续使用。
-        if "expires_at" in changes and changes["expires_at"] <= await get_now():
+        # 永久模式成对清空限制，切回有限模式必须提供完整有效配置。
+        changes = normalize_limits(record, changes)
+        if changes.get("expires_at") is not None and changes["expires_at"] <= await get_now():
             # 兼容旧管理页完整回传过期时间：未改变期限时允许只编辑备注等字段。
             if changes["expires_at"] != record.expires_at:
                 raise HTTPException(400, "新的有效期必须晚于当前时间")
         max_uploads = changes.get("max_uploads", record.max_uploads)
-        if record.used_count + record.reserved_count > max_uploads:
+        if max_uploads is not None and record.used_count + record.reserved_count > max_uploads:
             raise HTTPException(409, "上传总次数不能小于已使用次数与上传中占用次数之和，请刷新后重试")
         if new_code and new_code != record.code_value:
             # 版本由数据库递增，两个改码请求并发时任一旧令牌都不会被错误复用。
@@ -148,7 +152,7 @@ async def update_code(code_id, data):
                 changed, _ = await conn.execute_query(
                     f"UPDATE deliverycode SET {assignments} WHERE id = {placeholders[-2]} "
                     f"AND deleted = 0 "
-                    f"AND used_count + reserved_count <= {placeholders[-1]}",
+                    f"AND used_count + reserved_count <= COALESCE({placeholders[-1]}, used_count + reserved_count)",
                     [json.dumps(changes[field], ensure_ascii=False) if field == "tags" else changes[field]
                      for field in bound_fields] + [record.id, max_uploads],
                 )
@@ -171,11 +175,14 @@ async def list_codes(*, page=1, page_size=20, keyword="", status="all", tag="", 
     if status == "exhausted":
         query = query.filter(used_count__gte=F("max_uploads"))
     elif status == "disabled":
-        query = query.filter(enabled=False, used_count__lt=F("max_uploads"))
+        query = query.filter(Q(max_uploads__isnull=True) | Q(used_count__lt=F("max_uploads")), enabled=False)
     elif status == "expired":
         query = query.filter(enabled=True, expires_at__lte=now, used_count__lt=F("max_uploads"))
     elif status == "active":
-        query = query.filter(enabled=True, expires_at__gt=now, used_count__lt=F("max_uploads"))
+        query = query.filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+            Q(max_uploads__isnull=True) | Q(used_count__lt=F("max_uploads")), enabled=True,
+        )
     if keyword.strip():
         query = query.filter(Q(name__icontains=keyword.strip()) | Q(note__icontains=keyword.strip()))
     if tag.strip():
@@ -205,12 +212,18 @@ async def batch_codes(data):
             raise HTTPException(404, "寄件码不存在、已删除或不可用：" + "、".join(missing))
         if data.action == "enable" and any(record.code_value is None for record in records):
             raise HTTPException(409, "所选记录包含没有原文的旧码，请先重新设置寄件码")
+        limit_changes = {}
         if data.action == "update":
+            requested = data.model_dump(exclude_unset=True, exclude={"ids", "action"})
+            # 批量空白值表示不修改，永久开关则会显式清空两项限制。
+            requested = {key: value for key, value in requested.items() if value is not None}
+            for record in records:
+                limit_changes = normalize_limits(record, requested)
             now = await get_now()
-            if data.expires_at is not None and data.expires_at <= now:
+            if limit_changes.get("expires_at") is not None and limit_changes["expires_at"] <= now:
                 raise HTTPException(400, "新的有效期必须晚于当前时间")
-            if data.max_uploads is not None:
-                invalid = [str(record.id) for record in records if record.used_count + record.reserved_count > data.max_uploads]
+            if limit_changes.get("max_uploads") is not None:
+                invalid = [str(record.id) for record in records if record.used_count + record.reserved_count > limit_changes["max_uploads"]]
                 if invalid:
                     raise HTTPException(409, "上传次数不能小于已使用和上传中占用次数，受影响寄件码：" + "、".join(invalid))
         if data.action == "delete":
@@ -218,10 +231,7 @@ async def batch_codes(data):
             return {"message": "已删除寄件码，已收文件和取件码不受影响", "count": len(data.ids)}
         changes = {"enabled": data.action == "enable"} if data.action in {"enable", "disable"} else {}
         if data.action == "update":
-            if data.expires_at is not None:
-                changes["expires_at"] = data.expires_at
-            if data.max_uploads is not None:
-                changes["max_uploads"] = data.max_uploads
+            changes.update(limit_changes)
         # 批量条件写入必须覆盖全部记录，防止并发上传使其中一个新额度失效。
         placeholders = _sql_placeholders(len(changes) + len(data.ids) + 1)
         assignments = ", ".join(f"{field} = {placeholders[index]}" for index, field in enumerate(changes))
@@ -230,10 +240,10 @@ async def batch_codes(data):
         id_placeholders = ", ".join(placeholders[len(changes):-1])
         condition = ""
         values = list(changes.values()) + data.ids
-        if data.action == "update" and data.max_uploads is not None:
+        if data.action == "update" and limit_changes.get("max_uploads") is not None:
             # max_uploads 是 update 时第一个或第二个字段，改用其实际占位符。
             condition = f" AND used_count + reserved_count <= {placeholders[-1]}"
-            values.append(data.max_uploads)
+            values.append(limit_changes["max_uploads"])
         changed, _ = await conn.execute_query(
             f"UPDATE deliverycode SET {assignments} WHERE id IN ({id_placeholders}) "
             f"AND deleted = 0{condition}", values,
@@ -242,3 +252,20 @@ async def batch_codes(data):
             raise HTTPException(409, "寄件码状态已变化，请刷新后重试")
         result = await DeliveryCode.filter(id__in=data.ids, deleted=False).using_db(conn)
         return {"items": [await code_summary(record) for record in result], "count": len(result)}
+
+
+def normalize_limits(record, changes):
+    """保证永久与有限模式完整切换；只改备注时不触碰历史授权限制。"""
+    changes = dict(changes)
+    permanent = changes.pop("is_permanent", None)
+    if permanent is True:
+        changes.update(expires_at=None, max_uploads=None)
+    elif permanent is False or "expires_at" in changes or "max_uploads" in changes:
+        # 批量“保持原模式”不能悄悄把永久码改成有限码，必须显式选择转换。
+        if record.expires_at is None and permanent is not False:
+            raise HTTPException(400, "所选记录包含永久寄件码，请明确选择有限模式并设置有效期和次数")
+        expiry = changes.get("expires_at", record.expires_at)
+        maximum = changes.get("max_uploads", record.max_uploads)
+        if expiry is None or maximum is None:
+            raise HTTPException(400, "切换为有限寄件码时，请同时设置有效期和最大上传次数")
+    return changes

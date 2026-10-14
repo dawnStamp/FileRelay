@@ -5,7 +5,7 @@ import os
 from datetime import timedelta
 
 from fastapi import HTTPException
-from tortoise.expressions import F
+from tortoise.expressions import F, Q
 from tortoise.transactions import in_transaction
 
 from apps.base.models import DeliveryCode, FileCodes, StorageReservation, UploadChunk, PresignUploadSession
@@ -26,8 +26,9 @@ async def reserve_slot(code_id, version, file_name, upload_id):
         p = _sql_placeholders(3)
         changed, _ = await conn.execute_query(
             f"UPDATE deliverycode SET reserved_count = reserved_count + 1 "
-            f"WHERE id = {p[0]} AND expires_at > {p[1]} AND auth_version = {p[2]} "
-            "AND enabled = 1 AND deleted = 0 AND used_count + reserved_count < max_uploads",
+            f"WHERE id = {p[0]} AND (expires_at IS NULL OR expires_at > {p[1]}) AND auth_version = {p[2]} "
+            # 永久码跳过额度上限，仍原子记录预占，供清理和使用统计复用。
+            "AND enabled = 1 AND deleted = 0 AND (max_uploads IS NULL OR used_count + reserved_count < max_uploads)",
             [code_id, now, version],
         )
         if changed != 1:
@@ -98,8 +99,9 @@ async def commit_delivery(record, fields):
         if reserved != 1:
             raise HTTPException(409, "该上传已完成或正在清理")
         changed = await DeliveryCode.filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=await get_now()),
             id=record.delivery_id, auth_version=record.auth_version, enabled=True,
-            deleted=False, expires_at__gt=await get_now(), reserved_count__gt=0,
+            deleted=False, reserved_count__gt=0,
         ).using_db(conn).update(reserved_count=F("reserved_count") - 1, used_count=F("used_count") + 1)
         if changed != 1:
             raise HTTPException(409, "寄件码在上传期间失效")
@@ -109,7 +111,7 @@ async def commit_delivery(record, fields):
             fields.update(file_path=record.file_path, uuid_file_name=record.stored_name)
         share = await FileCodes.create(using_db=conn, **fields)
         # 耗尽后保留授权历史和文件关联；管理员增加次数后可显式重新启用。
-        await DeliveryCode.filter(id=record.delivery_id, reserved_count=0, used_count__gte=F("max_uploads")).using_db(conn).update(enabled=False)
+        await DeliveryCode.filter(id=record.delivery_id, reserved_count=0, max_uploads__isnull=False, used_count__gte=F("max_uploads")).using_db(conn).update(enabled=False)
         return share
 
 

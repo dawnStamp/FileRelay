@@ -14,18 +14,28 @@ class DeliveryCodeConfig(BaseModel):
     # 禁止静默接受 owner_id 等越权字段，未来多用户必须由服务端身份决定归属。
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=100)
-    expires_at: datetime
+    is_permanent: bool = False
+    expires_at: datetime | None = None
     max_uploads: int = Field(default=1, ge=1, le=100000)
 
     @field_validator("expires_at")
     @classmethod
     def validate_expiry(cls, value):
+        if value is None:
+            return value
         # 无时区的后台输入明确解释为北京时间，接口返回保留时区。
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone(timedelta(hours=8)))
         if value <= datetime.now(timezone.utc):
             raise ValueError("有效期必须晚于当前时间")
         return value
+
+    @model_validator(mode="after")
+    def require_limited_expiry(self):
+        # 永久模式由服务层同时清空期限和次数；普通模式必须提供有效期限。
+        if not self.is_permanent and self.expires_at is None:
+            raise ValueError("非永久寄件码必须设置有效期")
+        return self
 
 
 class CreateDeliveryCode(DeliveryCodeConfig):
@@ -57,6 +67,7 @@ class UpdateDeliveryCode(BaseModel):
     """编辑寄件码时只更新提交的字段，历史过期记录可单独维护备注。"""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    is_permanent: bool | None = None
     name: str | None = Field(default=None, min_length=1, max_length=100)
     expires_at: datetime | None = None
     max_uploads: int | None = Field(default=None, ge=1, le=100000)
@@ -90,7 +101,9 @@ class UpdateDeliveryCode(BaseModel):
     @model_validator(mode="after")
     def reject_explicit_null(self):
         # 可选字段表示可以省略，不能用 null 意外清空已有配置。
-        forbidden = {"name", "expires_at", "max_uploads", "note", "tags"}
+        forbidden = {"name", "is_permanent", "max_uploads", "note", "tags"}
+        if not self.is_permanent:
+            forbidden.add("expires_at")
         if any(field in self.model_fields_set and getattr(self, field) is None for field in forbidden):
             raise ValueError("编辑字段不能为 null；请省略不修改的字段")
         return self
@@ -102,6 +115,7 @@ class BatchDeliveryCodes(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ids: list[int] = Field(min_length=1, max_length=1000)
     action: str
+    is_permanent: bool | None = None
     expires_at: datetime | None = None
     max_uploads: int | None = Field(default=None, ge=1, le=100000)
 
@@ -113,14 +127,19 @@ class BatchDeliveryCodes(BaseModel):
 
     @model_validator(mode="after")
     def validate_batch(self):
+        # 只有显式选择永久才允许清空期限；省略模式保持原设置。
+        if "is_permanent" in self.model_fields_set and self.is_permanent is None:
+            raise ValueError("永久选项不能为 null")
+        if self.is_permanent is False and (self.expires_at is None or self.max_uploads is None):
+            raise ValueError("切换为有限寄件码时，请同时设置有效期和最大上传次数")
         self.ids = list(dict.fromkeys(self.ids))
         if not self.ids:
             raise ValueError("请至少选择一个寄件码")
         if self.action not in {"enable", "disable", "delete", "update"}:
             raise ValueError("不支持的批量操作")
-        if self.action == "update" and self.expires_at is None and self.max_uploads is None:
+        if self.action == "update" and self.is_permanent is None and self.expires_at is None and self.max_uploads is None:
             raise ValueError("批量更新至少需要有效期或上传次数")
-        if self.action != "update" and (self.expires_at is not None or self.max_uploads is not None):
+        if self.action != "update" and (self.is_permanent is not None or self.expires_at is not None or self.max_uploads is not None):
             raise ValueError("该批量操作不接受有效期或上传次数")
         return self
 

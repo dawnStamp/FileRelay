@@ -119,8 +119,9 @@ class DeliveryCode(models.Model):
     name = fields.CharField(max_length=100)
     note = fields.CharField(max_length=2000, default="")
     tags = fields.JSONField(default=list)
-    expires_at = fields.DatetimeField()
-    max_uploads = fields.IntField()
+    # 两项同时为 NULL 表示永久且不限次数；仍保留使用统计和管理员启停。
+    expires_at = fields.DatetimeField(null=True)
+    max_uploads = fields.IntField(null=True)
     used_count = fields.IntField(default=0)
     reserved_count = fields.IntField(default=0)
     enabled = fields.BooleanField(default=True)
