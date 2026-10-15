@@ -74,11 +74,8 @@ async def toggle(code_id: int, data: SetDeliveryEnabled):
 
 @admin_api.delete("/codes/{code_id}")
 async def delete_code(code_id: int):
-    # 软删除保留收件关联；普通取件码生命周期独立，不撤销已完成文件。
-    changed = await DeliveryCode.filter(id=code_id, deleted=False).update(deleted=True, enabled=False, auth_version=F("auth_version") + 1)
-    if not changed:
-        raise HTTPException(404, "寄件码不存在或已删除")
-    return APIResponse(detail={"message": "寄件授权已撤销，已收文件仍保留"})
+    # 与 MCP 入口复用相同撤销逻辑，管理员鉴权仍由路由依赖负责。
+    return APIResponse(detail=await services.delete_code(code_id))
 
 
 @admin_api.get("/codes/{code_id}/secret")

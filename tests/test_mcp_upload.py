@@ -17,9 +17,12 @@ async def test_mcp_initialize_and_list_tools(initialized_client):
         "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
     )
     assert tools_response.status_code == 200
+    # 寄件管理工具加入清单，但执行时仍须单独校验管理员身份。
     assert {tool["name"] for tool in tools_response.json()["result"]["tools"]} == {
         "share_text",
         "share_file",
+        "create_delivery_code",
+        "delete_delivery_code",
     }
 
 

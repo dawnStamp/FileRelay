@@ -270,3 +270,13 @@ def normalize_limits(record, changes):
         if expiry is None or maximum is None:
             raise HTTPException(400, "切换为有限寄件码时，请同时设置有效期和最大上传次数")
     return changes
+
+
+async def delete_code(code_id: int):
+    """后台与 MCP 共用原子软删除，保留收件关联并立即撤销旧寄件凭证。"""
+    changed = await DeliveryCode.filter(id=code_id, deleted=False).update(
+        deleted=True, enabled=False, auth_version=F("auth_version") + 1,
+    )
+    if not changed:
+        raise HTTPException(404, "寄件码不存在或已删除")
+    return {"message": "寄件授权已撤销，已收文件仍保留"}

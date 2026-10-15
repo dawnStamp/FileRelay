@@ -1,4 +1,4 @@
-"""Stateless MCP Streamable HTTP endpoint for quick share uploads."""
+"""无状态 MCP 接口：提供快速分享以及仅限管理员的寄件授权管理。"""
 import base64
 import binascii
 import html
@@ -8,6 +8,8 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
+from pydantic import ValidationError
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, Response
 
@@ -15,6 +17,8 @@ from apps.base.auth import _require_admin_payload
 from apps.base.file_validation import validate_file_type, validate_upload_file
 from apps.base.services import FileUploadService, validate_file_size
 from apps.base.utils import ip_limit, validate_expire_style
+from apps.delivery import services as delivery_services
+from apps.delivery.schemas import CreateDeliveryCode, DeleteDeliveryCode
 from core.settings import settings
 from core.utils import sanitize_filename
 
@@ -109,6 +113,22 @@ def _tool_definitions() -> list[dict]:
                 "required": ["filename", "content_base64"],
             },
         },
+        {
+            "name": "create_delivery_code",
+            "description": "管理员创建寄件码，授权他人上传文件。支持自定义码或自动生成、有限期次数或永久不限次。"
+                           "非永久模式必须提供 expires_at。返回 item（含记录 ID）、code 和寄件链接 url；始终需要管理员 Token。",
+            # 直接复用后台参数模型，长度、额外字段及时间规则由同一份模型校验。
+            "inputSchema": CreateDeliveryCode.model_json_schema(),
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+        },
+        {
+            "name": "delete_delivery_code",
+            "description": "管理员按 code_id 删除寄件码，立即撤销该码及旧上传凭证，保留已收文件和已有取件码。"
+                           "只在用户明确要求删除指定寄件码时调用；始终需要管理员 Token，不能使用寄件凭证。",
+            "inputSchema": DeleteDeliveryCode.model_json_schema(),
+            # 删除会撤销授权，明确标记为破坏性操作，供客户端展示或审批。
+            "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
+        },
     ]
 
 
@@ -126,6 +146,18 @@ def _share_result(request: Request, code: str, name: str) -> dict:
 
 async def _call_tool(request: Request, tool_name: str, arguments: dict) -> dict:
     authorization = request.headers.get("authorization", "")
+    if tool_name in {"create_delivery_code", "delete_delivery_code"}:
+        # 管理能力不随游客上传开关开放，也不占用普通文件上传的频率额度。
+        _require_admin_payload(authorization)
+        if tool_name == "create_delivery_code":
+            create_data = CreateDeliveryCode.model_validate(arguments)
+            result = await delivery_services.create_code(create_data)
+            base_url = str(request.base_url).rstrip("/")
+            return {**result, "url": f"{base_url}/#/delivery?code={quote(result['code'], safe='')}"}
+        delete_data = DeleteDeliveryCode.model_validate(arguments)
+        result = await delivery_services.delete_code(delete_data.code_id)
+        return {"code_id": delete_data.code_id, **result}
+
     if settings.mcp_require_token or not settings.open_upload:
         _require_admin_payload(authorization)
     ip = ip_limit["upload"](request)
@@ -211,7 +243,8 @@ async def mcp_endpoint(request: Request):
             if not isinstance(arguments, dict):
                 return JSONResponse(_jsonrpc_error(request_id, -32602, "Invalid params"))
             try:
-                tool_value = await _call_tool(request, params["name"], arguments)
+                # 创建寄件码包含 datetime，统一转换后再生成文本与结构化结果。
+                tool_value = jsonable_encoder(await _call_tool(request, params["name"], arguments))
                 result = {"content": [{"type": "text", "text": json.dumps(tool_value, ensure_ascii=False)}], "structuredContent": tool_value}
             except LookupError as exc:
                 return JSONResponse(_jsonrpc_error(request_id, -32602, str(exc)))
@@ -219,11 +252,20 @@ async def mcp_endpoint(request: Request):
                 if exc.status_code in {401, 403}:
                     raise
                 result = {"content": [{"type": "text", "text": str(exc.detail)}], "isError": True}
+            except ValidationError as exc:
+                # 不回显 Pydantic 的原始 input/context，避免错误响应包含寄件口令等输入值。
+                message = "；".join(
+                    error["msg"] for error in exc.errors(include_input=False, include_context=False, include_url=False)
+                )
+                result = {"content": [{"type": "text", "text": message}], "isError": True}
             except (TypeError, ValueError) as exc:
                 result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
         else:
             return JSONResponse(_jsonrpc_error(request_id, -32601, "Method not found"))
-        return JSONResponse(_jsonrpc_result(request_id, result), headers={"MCP-Protocol-Version": MCP_PROTOCOL_VERSION})
+        # 创建结果包含上传口令，不允许浏览器或中间代理缓存 MCP 响应。
+        return JSONResponse(_jsonrpc_result(request_id, result), headers={
+            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION, "Cache-Control": "no-store",
+        })
     except HTTPException as exc:
         return JSONResponse(
             _jsonrpc_error(request_id, -32001 if exc.status_code == 401 else -32003, str(exc.detail)),
