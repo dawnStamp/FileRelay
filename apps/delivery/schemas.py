@@ -13,10 +13,11 @@ class DeliveryCodeConfig(BaseModel):
     """寄件授权的公共字段，文件和存储配置不在此模型中。"""
     # 禁止静默接受 owner_id 等越权字段，未来多用户必须由服务端身份决定归属。
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    name: str = Field(min_length=1, max_length=100)
-    is_permanent: bool = False
-    expires_at: datetime | None = None
-    max_uploads: int = Field(default=1, ge=1, le=100000)
+    # 字段说明同时供后台接口与 MCP 工具清单使用，避免两处参数约定漂移。
+    name: str = Field(min_length=1, max_length=100, description="寄件用途名称")
+    is_permanent: bool = Field(default=False, description="为 true 时永久有效且不限次数，忽略期限和次数设置")
+    expires_at: datetime | None = Field(default=None, description="非永久模式必填，须晚于当前时间；推荐带时区的 ISO 8601 时间")
+    max_uploads: int = Field(default=1, ge=1, le=100000, description="有限模式的最大成功寄件次数，默认为 1")
 
     @field_validator("expires_at")
     @classmethod
@@ -40,7 +41,7 @@ class DeliveryCodeConfig(BaseModel):
 
 class CreateDeliveryCode(DeliveryCodeConfig):
     # 新建自定义寄件码最多 32 位；自动生成仍固定为 16 位。
-    code: str = Field(default="", max_length=32)
+    code: str = Field(default="", max_length=32, description="自定义寄件码，8～32 位字母、数字、下划线或短横线；留空自动生成")
     note: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list)
 
@@ -152,3 +153,10 @@ class VerifyDeliveryCode(BaseModel):
 class SetDeliveryEnabled(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
+
+
+class DeleteDeliveryCode(BaseModel):
+    """MCP 按明确的记录 ID 撤销授权，拒绝布尔值、浮点数和多余参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+    code_id: int = Field(gt=0, strict=True, description="要删除的寄件码记录 ID，可从创建结果 item.id 或后台列表取得")
